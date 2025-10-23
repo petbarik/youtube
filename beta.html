@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>YouTube Playlist Dashboard (Restricted)</title>
+  <style>
+    :root{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;}
+    body{margin:0;padding:20px;background:#f6f7fb;color:#111}
+    .card{max-width:1000px;margin:0 auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 6px 24px rgba(20,20,50,0.08)}
+    h1{font-size:22px;margin:0 0 14px}
+    .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+    input[type=text], input[type=password]{flex:1;min-width:220px;padding:10px;border-radius:8px;border:1px solid #ddd}
+    input[type=number]{width:110px;padding:10px;border-radius:8px;border:1px solid #ddd}
+    .btn{padding:10px 14px;border-radius:8px;border:0;background:#2563eb;color:#fff;cursor:pointer}
+    .btn.secondary{background:#6b7280}
+    .btn.danger{background:#dc2626}
+    .note{font-size:13px;color:#555;margin-top:6px}
+    .preview{margin-top:18px}
+    .embed-wrap{position:relative;padding-top:56.25%;background:#000;border-radius:8px;overflow:hidden}
+    iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0}
+    .error{color:#b91c1c;margin-top:8px}
+    .row{display:flex;gap:8px;align-items:center}
+    label{font-size:14px}
+    .small{font-size:13px;color:#666}
+    ul.playlist{list-style:none;padding:0;margin:0;max-height:200px;overflow:auto;border:1px solid #ddd;border-radius:8px}
+    ul.playlist li{padding:8px 10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center}
+    ul.playlist li:last-child{border-bottom:none}
+    ul.playlist button{font-size:12px;padding:6px 10px}
+
+    /* login overlay */
+    .overlay{position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:60}
+    .login-box{background:#fff;padding:22px;border-radius:12px;max-width:420px;width:92%;box-shadow:0 10px 40px rgba(10,10,30,0.3)}
+    .login-box h2{margin:0 0 10px}
+    .login-note{font-size:13px;color:#444;margin-bottom:10px}
+    .muted{color:#666;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="card" id="appCard">
+    <h1>YouTube Playlist Dashboard</h1>
+    <p class="note">Paste YouTube URLs, build a playlist, and play them inside this page. Playlists are saved per authorized user in your browser.</p>
+
+    <div class="controls">
+      <input id="urlInput" type="text" placeholder="https://www.youtube.com/watch?v=..." />
+      <input id="startInput" type="number" min="0" placeholder="start (seconds)" />
+      <label class="row small"><input id="autoplay" type="checkbox" /> Autoplay</label>
+      <button id="addBtn" class="btn">Add to Playlist</button>
+    </div>
+
+    <h3>Playlist (<span id="currentUserDisplay">not signed in</span>)</h3>
+    <ul id="playlist" class="playlist"></ul>
+
+    <div class="preview">
+      <div id="embedArea" class="embed-wrap" style="display:none"></div>
+    </div>
+
+    <div style="margin-top:12px">
+      <button id="signOutBtn" class="btn secondary" style="display:none">Sign out</button>
+      <span class="small" id="saveStatus"></span>
+    </div>
+
+    <div id="error" class="error" role="alert" aria-live="polite"></div>
+  </div>
+
+  <!-- LOGIN OVERLAY: only allows users defined in users.json placed in the same folder -->
+  <div id="loginOverlay" class="overlay" aria-hidden="false">
+    <div class="login-box" role="dialog" aria-modal="true">
+      <h2>Sign in</h2>
+      <p class="login-note">Only users defined in <strong>users.json</strong> (in the same folder) may sign in. Contact the site administrator to add accounts.</p>
+      <div style="margin-bottom:10px">
+        <input id="username" type="text" placeholder="Username" style="width:100%;margin-bottom:8px;padding:8px;border-radius:6px;border:1px solid #ddd" />
+        <input id="password" type="password" placeholder="Password" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd" />
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="loginBtn" class="btn">Sign in</button>
+        <span class="muted" id="loginHint"></span>
+      </div>
+      <p class="muted" style="margin-top:8px">This is a client-side restricted demo. The users file must be managed by the administrator. Do not use real or sensitive passwords.</p>
+    </div>
+  </div>
+
+  <script>
+    /****************************************************************
+     * Restricted mode
+     * - No registration, no demo accounts in UI
+     * - users.json must exist in the same folder and map usernames->passwords
+     * - Playlists are saved per user to localStorage under key 'playlist_<username>'
+     *
+     * Notes:
+     * - Browsers may block fetch() on file:// URLs. To use users.json locally,
+     *   serve the folder over HTTP (e.g. `python -m http.server`).
+     * - This is still client-side and not secure for real credentials.
+     ****************************************************************/
+
+    const USERS_JSON_PATH = './users.json';
+    const PLAYLIST_PREFIX = 'playlist_';
+
+    // DOM references
+    const urlInput = document.getElementById('urlInput');
+    const startInput = document.getElementById('startInput');
+    const autoplayCheckbox = document.getElementById('autoplay');
+    const addBtn = document.getElementById('addBtn');
+    const embedArea = document.getElementById('embedArea');
+    const errorEl = document.getElementById('error');
+    const playlistEl = document.getElementById('playlist');
+    const loginOverlay = document.getElementById('loginOverlay');
+    const loginBtn = document.getElementById('loginBtn');
+    const usernameInput = document.getElementById('username');
+    const passwordInput = document.getElementById('password');
+    const currentUserDisplay = document.getElementById('currentUserDisplay');
+    const signOutBtn = document.getElementById('signOutBtn');
+    const saveStatus = document.getElementById('saveStatus');
+    const loginHint = document.getElementById('loginHint');
+
+    let users = {};
+    let playlist = [];
+    let currentUser = null;
+    let autosaveTimer = null;
+
+    function showError(msg){ errorEl.textContent = msg; }
+    function clearError(){ errorEl.textContent = ''; }
+
+    // attempt to load users.json from same folder
+    async function loadExternalUsers(){
+      try{
+        const resp = await fetch(USERS_JSON_PATH + '?cachebust=' + Date.now());
+        if(!resp.ok) throw new Error('users.json not found');
+        const data = await resp.json();
+        if(typeof data === 'object' && data !== null) return data;
+      }catch(e){
+        return null;
+      }
+      return null;
+    }
+
+    function playlistKeyForUser(u){ return PLAYLIST_PREFIX + encodeURIComponent(u); }
+    function savePlaylistForCurrentUser(){
+      if(!currentUser) return;
+      try{
+        localStorage.setItem(playlistKeyForUser(currentUser), JSON.stringify(playlist));
+        updateSaveStatus('Saved');
+        clearTimeout(autosaveTimer);
+        autosaveTimer = setTimeout(()=> updateSaveStatus(''), 1500);
+      }catch(e){ updateSaveStatus('Save failed'); }
+    }
+    function loadPlaylistForUser(u){
+      try{
+        const raw = localStorage.getItem(playlistKeyForUser(u));
+        if(raw) return JSON.parse(raw);
+      }catch(e){}
+      return [];
+    }
+
+    function updateSaveStatus(text){ saveStatus.textContent = text; }
+
+    // YouTube helpers
+    function getYouTubeID(url){
+      if(!url || typeof url !== 'string') return null;
+      url = url.trim();
+      if(/^[A-Za-z0-9_-]{11}$/.test(url)) return url;
+      try{
+        const u = new URL(url);
+        if(u.hostname === 'youtu.be') return u.pathname.slice(1) || null;
+        if(u.hostname.includes('youtube.com')){
+          const v = u.searchParams.get('v'); if(v) return v;
+          const parts = u.pathname.split('/').filter(Boolean);
+          const embedIndex = parts.indexOf('embed'); if(embedIndex !== -1 && parts[embedIndex+1]) return parts[embedIndex+1];
+          const maybe = parts[parts.length-1]; if(maybe && /^[A-Za-z0-9_-]{11}$/.test(maybe)) return maybe;
+        }
+      }catch(e){}
+      const regex = /(?:v=|\/embed\/|youtu\.be\/)([A-Za-z0-9_-]{11})/;
+      const m = url.match(regex);
+      return m ? m[1] : null;
+    }
+
+    async function fetchTitle(videoId){
+      try{
+        const resp = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+        if(!resp.ok) return videoId;
+        const data = await resp.json();
+        return data.title || videoId;
+      }catch(e){ return videoId; }
+    }
+
+    async function renderPlaylist(){
+      playlistEl.innerHTML = '';
+      for(let i=0;i<playlist.length;i++){
+        const item = playlist[i];
+        const li = document.createElement('li');
+        const title = item.title || await fetchTitle(item.id);
+        item.title = title;
+        const titleSpan = document.createElement('span');
+        titleSpan.textContent = title;
+        li.appendChild(titleSpan);
+
+        const btns = document.createElement('div');
+        const playBtn = document.createElement('button');
+        playBtn.textContent = 'Play'; playBtn.className = 'btn secondary';
+        playBtn.addEventListener('click', ()=> playVideo(item));
+
+        const delBtn = document.createElement('button');
+        delBtn.textContent = 'Remove'; delBtn.className = 'btn danger';
+        delBtn.addEventListener('click', ()=>{ playlist.splice(i,1); renderPlaylist(); savePlaylistForCurrentUser(); });
+
+        btns.appendChild(playBtn); btns.appendChild(delBtn);
+        li.appendChild(btns);
+        playlistEl.appendChild(li);
+      }
+      updateSaveStatus('');
+    }
+
+    function playVideo(item){
+      embedArea.innerHTML = '';
+      const iframe = document.createElement('iframe');
+      iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(item.id) + (item.start ? ('?start=' + Math.max(0, Math.floor(Number(item.start)))) : '');
+      iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+      iframe.allowFullscreen = true;
+      embedArea.appendChild(iframe);
+      embedArea.style.display = 'block';
+    }
+
+    addBtn.addEventListener('click', async ()=>{
+      clearError();
+      if(!currentUser){ showError('You must sign in to add items.'); return; }
+      const id = getYouTubeID(urlInput.value);
+      if(!id){ showError('Invalid YouTube URL or ID'); return; }
+      const title = await fetchTitle(id);
+      const item = { id, start: startInput.value, autoplay: autoplayCheckbox.checked, title };
+      playlist.push(item);
+      renderPlaylist();
+      urlInput.value = ''; startInput.value = ''; autoplayCheckbox.checked = false;
+      savePlaylistForCurrentUser();
+    });
+
+    // Login handling (only users from users.json)
+    function authenticate(user, pass){ return users[user] && users[user] === pass; }
+
+    loginBtn.addEventListener('click', ()=>{
+      const u = usernameInput.value.trim(); const p = passwordInput.value;
+      if(!u || !p){ alert('Enter username and password.'); return; }
+      if(authenticate(u,p)){
+        currentUser = u; loginOverlay.style.display = 'none'; currentUserDisplay.textContent = u; signOutBtn.style.display = 'inline-block';
+        playlist = loadPlaylistForUser(u) || [];
+        renderPlaylist();
+      }else{
+        alert('Incorrect credentials.');
+      }
+    });
+
+    signOutBtn.addEventListener('click', ()=>{
+      currentUser = null; playlist = []; renderPlaylist(); loginOverlay.style.display = 'flex'; signOutBtn.style.display = 'none'; currentUserDisplay.textContent = 'not signed in'; updateSaveStatus('');
+    });
+
+    // initialize: load users.json then require login
+    (async function init(){
+      const ext = await loadExternalUsers();
+      if(!ext){
+        // users.json missing or unreachable
+        loginHint.textContent = 'users.json not found. Contact administrator.';
+        users = {};
+      }else{
+        users = ext;
+      }
+      // always require login (only users.json users allowed)
+      loginOverlay.style.display = 'flex';
+    })();
+  </script>
+</body>
+</html>
