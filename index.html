@@ -79,192 +79,193 @@
       <p class="muted" style="margin-top:8px">Use your username and password you provided the administrator when requesting registering!</p>
     </div>
   </div>
+    <script>
+  const USERS_JSON_PATH = './users.json';
+  const PLAYLIST_PREFIX = 'playlist_';
 
-  <script>
-    /****************************************************************
-     * Restricted mode
-     * - No registration, no demo accounts in UI
-     * - users.json must exist in the same folder and map usernames->passwords
-     * - Playlists are saved per user to localStorage under key 'playlist_<username>'
-     *
-     * Notes:
-     * - Browsers may block fetch() on file:// URLs. To use users.json locally,
-     *   serve the folder over HTTP (e.g. `python -m http.server`).
-     * - This is still client-side and not secure for real credentials.
-     ****************************************************************/
+  // DOM references
+  const urlInput = document.getElementById('urlInput');
+  const startInput = document.getElementById('startInput');
+  const autoplayCheckbox = document.getElementById('autoplay');
+  const addBtn = document.getElementById('addBtn');
+  const embedArea = document.getElementById('embedArea');
+  const errorEl = document.getElementById('error');
+  const playlistEl = document.getElementById('playlist');
+  const loginOverlay = document.getElementById('loginOverlay');
+  const loginBtn = document.getElementById('loginBtn');
+  const usernameInput = document.getElementById('username');
+  const passwordInput = document.getElementById('password');
+  const currentUserDisplay = document.getElementById('currentUserDisplay');
+  const signOutBtn = document.getElementById('signOutBtn');
+  const saveStatus = document.getElementById('saveStatus');
+  const loginHint = document.getElementById('loginHint');
 
-    const USERS_JSON_PATH = './users.json';
-    const PLAYLIST_PREFIX = 'playlist_';
+  let users = {};
+  let playlist = [];
+  let currentUser = null;
+  let autosaveTimer = null;
 
-    // DOM references
-    const urlInput = document.getElementById('urlInput');
-    const startInput = document.getElementById('startInput');
-    const autoplayCheckbox = document.getElementById('autoplay');
-    const addBtn = document.getElementById('addBtn');
-    const embedArea = document.getElementById('embedArea');
-    const errorEl = document.getElementById('error');
-    const playlistEl = document.getElementById('playlist');
-    const loginOverlay = document.getElementById('loginOverlay');
-    const loginBtn = document.getElementById('loginBtn');
-    const usernameInput = document.getElementById('username');
-    const passwordInput = document.getElementById('password');
-    const currentUserDisplay = document.getElementById('currentUserDisplay');
-    const signOutBtn = document.getElementById('signOutBtn');
-    const saveStatus = document.getElementById('saveStatus');
-    const loginHint = document.getElementById('loginHint');
+  // Utility functions
+  function showError(msg){ errorEl.textContent = msg; }
+  function clearError(){ errorEl.textContent = ''; }
+  function updateSaveStatus(text){ saveStatus.textContent = text; }
 
-    let users = {};
-    let playlist = [];
-    let currentUser = null;
-    let autosaveTimer = null;
+  function playlistKeyForUser(u){ return PLAYLIST_PREFIX + encodeURIComponent(u); }
+  function savePlaylistForCurrentUser(){
+    if(!currentUser) return;
+    try{
+      localStorage.setItem(playlistKeyForUser(currentUser), JSON.stringify(playlist));
+      updateSaveStatus('Saved');
+      clearTimeout(autosaveTimer);
+      autosaveTimer = setTimeout(()=> updateSaveStatus(''), 1500);
+    }catch(e){ updateSaveStatus('Save failed'); }
+  }
+  function loadPlaylistForUser(u){
+    try{ const raw = localStorage.getItem(playlistKeyForUser(u)); return raw ? JSON.parse(raw) : []; }
+    catch(e){ return []; }
+  }
 
-    function showError(msg){ errorEl.textContent = msg; }
-    function clearError(){ errorEl.textContent = ''; }
-
-    // attempt to load users.json from same folder
-    async function loadExternalUsers(){
-      try{
-        const resp = await fetch(USERS_JSON_PATH + '?cachebust=' + Date.now());
-        if(!resp.ok) throw new Error('users.json not found');
-        const data = await resp.json();
-        if(typeof data === 'object' && data !== null) return data;
-      }catch(e){
-        return null;
+  // YouTube helpers
+  function getYouTubeID(url){
+    if(!url) return null;
+    url = url.trim();
+    if(/^[A-Za-z0-9_-]{11}$/.test(url)) return url;
+    try{
+      const u = new URL(url);
+      if(u.hostname === 'youtu.be') return u.pathname.slice(1) || null;
+      if(u.hostname.includes('youtube.com')){
+        const v = u.searchParams.get('v'); if(v) return v;
+        const parts = u.pathname.split('/').filter(Boolean);
+        const embedIndex = parts.indexOf('embed'); if(embedIndex !== -1 && parts[embedIndex+1]) return parts[embedIndex+1];
+        const maybe = parts[parts.length-1]; if(/^[A-Za-z0-9_-]{11}$/.test(maybe)) return maybe;
       }
-      return null;
+    }catch(e){}
+    const regex = /(?:v=|\/embed\/|youtu\.be\/)([A-Za-z0-9_-]{11})/;
+    const m = url.match(regex);
+    return m ? m[1] : null;
+  }
+
+  async function fetchTitle(videoId){
+    try{
+      const resp = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+      if(!resp.ok) return videoId;
+      const data = await resp.json();
+      return data.title || videoId;
+    }catch(e){ return videoId; }
+  }
+
+  async function renderPlaylist(){
+    playlistEl.innerHTML = '';
+    for(let i=0;i<playlist.length;i++){
+      const item = playlist[i];
+      const li = document.createElement('li');
+      const title = item.title || await fetchTitle(item.id);
+      item.title = title;
+      const titleSpan = document.createElement('span');
+      titleSpan.textContent = title;
+      li.appendChild(titleSpan);
+
+      const btns = document.createElement('div');
+      const playBtn = document.createElement('button');
+      playBtn.textContent = 'Play'; playBtn.className = 'btn secondary';
+      playBtn.addEventListener('click', ()=> playVideo(item));
+
+      const delBtn = document.createElement('button');
+      delBtn.textContent = 'Remove'; delBtn.className = 'btn danger';
+      delBtn.addEventListener('click', ()=>{ playlist.splice(i,1); renderPlaylist(); savePlaylistForCurrentUser(); });
+
+      btns.appendChild(playBtn); btns.appendChild(delBtn);
+      li.appendChild(btns);
+      playlistEl.appendChild(li);
     }
+    updateSaveStatus('');
+  }
 
-    function playlistKeyForUser(u){ return PLAYLIST_PREFIX + encodeURIComponent(u); }
-    function savePlaylistForCurrentUser(){
-      if(!currentUser) return;
-      try{
-        localStorage.setItem(playlistKeyForUser(currentUser), JSON.stringify(playlist));
-        updateSaveStatus('Saved');
-        clearTimeout(autosaveTimer);
-        autosaveTimer = setTimeout(()=> updateSaveStatus(''), 1500);
-      }catch(e){ updateSaveStatus('Save failed'); }
-    }
-    function loadPlaylistForUser(u){
-      try{
-        const raw = localStorage.getItem(playlistKeyForUser(u));
-        if(raw) return JSON.parse(raw);
-      }catch(e){}
-      return [];
-    }
+  function playVideo(item){
+    embedArea.innerHTML = '';
+    const iframe = document.createElement('iframe');
+    iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(item.id) + (item.start ? ('?start=' + Math.max(0, Math.floor(Number(item.start)))) : '');
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+    iframe.allowFullscreen = true;
+    embedArea.appendChild(iframe);
+    embedArea.style.display = 'block';
+  }
 
-    function updateSaveStatus(text){ saveStatus.textContent = text; }
+  addBtn.addEventListener('click', async ()=>{
+    clearError();
+    if(!currentUser){ showError('You must sign in to add items.'); return; }
+    const id = getYouTubeID(urlInput.value);
+    if(!id){ showError('Invalid YouTube URL or ID'); return; }
+    const title = await fetchTitle(id);
+    const item = { id, start: startInput.value, autoplay: autoplayCheckbox.checked, title };
+    playlist.push(item);
+    renderPlaylist();
+    urlInput.value = ''; startInput.value = ''; autoplayCheckbox.checked = false;
+    savePlaylistForCurrentUser();
+  });
 
-    // YouTube helpers
-    function getYouTubeID(url){
-      if(!url || typeof url !== 'string') return null;
-      url = url.trim();
-      if(/^[A-Za-z0-9_-]{11}$/.test(url)) return url;
-      try{
-        const u = new URL(url);
-        if(u.hostname === 'youtu.be') return u.pathname.slice(1) || null;
-        if(u.hostname.includes('youtube.com')){
-          const v = u.searchParams.get('v'); if(v) return v;
-          const parts = u.pathname.split('/').filter(Boolean);
-          const embedIndex = parts.indexOf('embed'); if(embedIndex !== -1 && parts[embedIndex+1]) return parts[embedIndex+1];
-          const maybe = parts[parts.length-1]; if(maybe && /^[A-Za-z0-9_-]{11}$/.test(maybe)) return maybe;
-        }
-      }catch(e){}
-      const regex = /(?:v=|\/embed\/|youtu\.be\/)([A-Za-z0-9_-]{11})/;
-      const m = url.match(regex);
-      return m ? m[1] : null;
-    }
+  // Load users.json
+  async function loadUsers(){
+    try{
+      const resp = await fetch(USERS_JSON_PATH + '?cachebust=' + Date.now());
+      if(!resp.ok) throw new Error('users.json not found');
+      const data = await resp.json();
+      if(typeof data === 'object' && data !== null) return data;
+    }catch(e){ return {}; }
+    return {};
+  }
 
-    async function fetchTitle(videoId){
-      try{
-        const resp = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
-        if(!resp.ok) return videoId;
-        const data = await resp.json();
-        return data.title || videoId;
-      }catch(e){ return videoId; }
-    }
+  // Cookie helpers for silent login
+  function getCookie(name){
+    const cookie = document.cookie.split('; ').find(row=>row.startsWith(name+'='));
+    return cookie ? cookie.split('=')[1] : null;
+  }
+  function rememberUser(username){
+    document.cookie = `lastUser=${username}; path=/; max-age=2592000`; // 30 days
+  }
+  function forgetUser(){
+    document.cookie = 'lastUser=; path=/; max-age=0';
+  }
 
-    async function renderPlaylist(){
-      playlistEl.innerHTML = '';
-      for(let i=0;i<playlist.length;i++){
-        const item = playlist[i];
-        const li = document.createElement('li');
-        const title = item.title || await fetchTitle(item.id);
-        item.title = title;
-        const titleSpan = document.createElement('span');
-        titleSpan.textContent = title;
-        li.appendChild(titleSpan);
+  // Authenticate
+  function authenticate(user, pass){ return users[user] && users[user] === pass; }
 
-        const btns = document.createElement('div');
-        const playBtn = document.createElement('button');
-        playBtn.textContent = 'Play'; playBtn.className = 'btn secondary';
-        playBtn.addEventListener('click', ()=> playVideo(item));
-
-        const delBtn = document.createElement('button');
-        delBtn.textContent = 'Remove'; delBtn.className = 'btn danger';
-        delBtn.addEventListener('click', ()=>{ playlist.splice(i,1); renderPlaylist(); savePlaylistForCurrentUser(); });
-
-        btns.appendChild(playBtn); btns.appendChild(delBtn);
-        li.appendChild(btns);
-        playlistEl.appendChild(li);
-      }
-      updateSaveStatus('');
-    }
-
-    function playVideo(item){
-      embedArea.innerHTML = '';
-      const iframe = document.createElement('iframe');
-      iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(item.id) + (item.start ? ('?start=' + Math.max(0, Math.floor(Number(item.start)))) : '');
-      iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
-      iframe.allowFullscreen = true;
-      embedArea.appendChild(iframe);
-      embedArea.style.display = 'block';
-    }
-
-    addBtn.addEventListener('click', async ()=>{
-      clearError();
-      if(!currentUser){ showError('You must sign in to add items.'); return; }
-      const id = getYouTubeID(urlInput.value);
-      if(!id){ showError('Invalid YouTube URL or ID'); return; }
-      const title = await fetchTitle(id);
-      const item = { id, start: startInput.value, autoplay: autoplayCheckbox.checked, title };
-      playlist.push(item);
+  loginBtn.addEventListener('click', ()=>{
+    const u = usernameInput.value.trim(); const p = passwordInput.value;
+    if(!u || !p){ alert('Enter username and password.'); return; }
+    if(authenticate(u,p)){
+      currentUser = u;
+      loginOverlay.style.display = 'none';
+      currentUserDisplay.textContent = currentUser;
+      playlist = loadPlaylistForUser(currentUser) || [];
       renderPlaylist();
-      urlInput.value = ''; startInput.value = ''; autoplayCheckbox.checked = false;
-      savePlaylistForCurrentUser();
-    });
+      rememberUser(u);
+    }else{ alert('Incorrect credentials.'); }
+  });
 
-    // Login handling (only users from users.json)
-    function authenticate(user, pass){ return users[user] && users[user] === pass; }
+  signOutBtn.addEventListener('click', ()=>{
+    forgetUser();
+    currentUser = null; playlist = []; renderPlaylist();
+    loginOverlay.style.display = 'flex'; signOutBtn.style.display = 'none';
+    currentUserDisplay.textContent = 'not signed in';
+    updateSaveStatus('');
+  });
 
-    loginBtn.addEventListener('click', ()=>{
-      const u = usernameInput.value.trim(); const p = passwordInput.value;
-      if(!u || !p){ alert('Enter username and password.'); return; }
-      if(authenticate(u,p)){
-        currentUser = u; loginOverlay.style.display = 'none'; currentUserDisplay.textContent = u; signOutBtn.style.display = 'inline-block';
-        playlist = loadPlaylistForUser(u) || [];
-        renderPlaylist();
-      }else{
-        alert('Incorrect credentials.');
-      }
-    });
+  // Initialize
+  (async function init(){
+    users = await loadUsers();
+    loginOverlay.style.display = 'flex';
 
-    signOutBtn.addEventListener('click', ()=>{
-      currentUser = null; playlist = []; renderPlaylist(); loginOverlay.style.display = 'flex'; signOutBtn.style.display = 'none'; currentUserDisplay.textContent = 'not signed in'; updateSaveStatus('');
-    });
-
-    // initialize: load users.json then require login
-    (async function init(){
-      const ext = await loadExternalUsers();
-      if(!ext){
-        // users.json missing or unreachable
-        loginHint.textContent = 'users.json not found. Contact administrator.';
-        users = {};
-      }else{
-        users = ext;
-      }
-      // always require login (only users.json users allowed)
-      loginOverlay.style.display = 'flex';
-    })();
+    // Silent 30-day auto-login
+    const lastUser = getCookie('lastUser');
+    if(lastUser && users[lastUser]){
+      currentUser = lastUser;
+      loginOverlay.style.display = 'none';
+      currentUserDisplay.textContent = currentUser;
+      playlist = loadPlaylistForUser(currentUser) || [];
+      renderPlaylist();
+    }
+  })();
   </script>
 </body>
 </html>
